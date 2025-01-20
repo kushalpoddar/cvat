@@ -1031,6 +1031,7 @@ def get_audio_job_export_data(job_id, dst_file, job, temp_dir_base, temp_dir):
     labels_list = list(labels_queryset.values())
 
     labels_mapping = {}
+    gt_jobs = []
 
     for label in labels_list:
         labels_mapping[label["id"]] = label
@@ -1044,25 +1045,118 @@ def get_audio_job_export_data(job_id, dst_file, job, temp_dir_base, temp_dir):
         for attribute in attributes_list:
             labels_mapping[label["id"]]["attributes"][attribute["id"]] = attribute
 
-        slogger.glob.debug("JOB LABELS ATTRIBUTES")
-        slogger.glob.debug(json.dumps(attributes_list))
-
-
-    slogger.glob.debug("JOB LABELS")
-    slogger.glob.debug(json.dumps(labels_list))
-
-    # audio_file_path = os.path.join(temp_dir, str(job_id) + ".wav")
-    # with wave.open(audio_file_path, 'wb') as wave_file:
-    #     wave_file.setnchannels(1)
-    #     wave_file.setsampwidth(4)
-    #     wave_file.setframerate(44100)
-    #     wave_file.writeframes(concat_array)
-
     annotation_audio_chunk_file_paths = chunk_annotation_audio(concat_array, temp_dir, annotations)
 
-    for i, annotation in enumerate(annotations):
-        entry = {
-            "path": os.path.basename(annotation_audio_chunk_file_paths[i]),
+    # handle Gt jobs
+    if job_details.segment.type == "specific_frames":
+        frames = job_details.segment.frames
+        start_frame = frames[0]
+        segment_size = job_details.segment.task.segment_size
+        overlap = job_details.segment.task.overlap
+
+        def generate_jobs(included_frames: list[int], segment_size: int, overlap: int) -> list[dict]:
+            if not included_frames:
+                return []
+
+            jobs = []
+            start_frame = included_frames[0]
+
+            while start_frame + segment_size <= included_frames[-1]:
+                end_frame = start_frame + segment_size - 1
+
+                # Check if both start_frame and end_frame exist in included_frames
+                start_exists = start_frame in included_frames
+                end_exists = end_frame in included_frames
+
+                if start_exists and end_exists:
+                    jobs.append({
+                        "start_frame": start_frame,
+                        "end_frame": end_frame
+                    })
+
+                # Move start_frame back by the overlap for the next job
+                start_frame = end_frame - overlap + 1
+
+                # Find the next valid start frame
+                while start_frame not in included_frames and start_frame <= included_frames[-1]:
+                    start_frame += 1
+
+                # Break if we can't find a valid next start frame
+                if start_frame not in included_frames:
+                    break
+
+            # Handle the last section if necessary
+            last_start = start_frame
+            if last_start in included_frames and last_start < included_frames[-1]:
+                jobs.append({
+                    "start_frame": last_start,
+                    "end_frame": included_frames[-1]
+                })
+
+            return jobs
+
+        gt_jobs = generate_jobs(included_frames=frames, segment_size=segment_size, overlap=overlap)
+        # fetch all jobs of this task
+        task_jobs = Job.objects.filter(segment__task__id=job_details.segment.task_id).order_by('id')
+        start = 0
+        for job_index, job in enumerate(task_jobs):
+            for i, gt_job in enumerate(gt_jobs):
+                if job.segment.start_frame == gt_job['start_frame'] and job.segment.stop_frame == gt_job['end_frame']:
+                    diff_in_frame = gt_job['end_frame'] - gt_job['start_frame'] + 1
+                    duration = int(((job_details.segment.task.audio_total_duration/job_details.segment.task.data.size) * diff_in_frame)/1000)
+                    gt_jobs[i]['job_index'] = job_index
+                    gt_jobs[i]['start'] = start
+                    gt_jobs[i]['end'] = start + duration
+                    start = start + duration
+                    break
+
+    def process_annotations(annotations, gt_jobs, job_details, labels_mapping):
+        final_data = []
+
+        for i, annotation in enumerate(annotations):
+            start = annotation["points"][0]
+            end = annotation["points"][3]
+
+            if job_details.segment.type == "specific_frames":
+                overlapping_jobs = []
+                for gt_job in gt_jobs:
+                    if not (end <= gt_job['start'] or start >= gt_job['end']):
+                        overlapping_jobs.append(gt_job)
+
+                if len(overlapping_jobs) > 1:
+                    for job in overlapping_jobs:
+                        entry = create_entry(annotation, job_details, labels_mapping, i)
+                        entry['job_id'] = job['job_index']
+                        entry['start'] = 0 if start <= job['start'] else start - job['start']
+                        entry['end'] = job['end'] - job['start'] if end >= job['end'] else end - job['start']
+                        add_attributes(entry, annotation, labels_mapping)
+                        final_data.append(entry)
+                else:
+                    entry = create_entry(annotation, job_details, labels_mapping, i)
+                    for gt_job in gt_jobs:
+                        if gt_job['start'] <= start and gt_job['end'] >= end:
+                            entry['job_id'] = gt_job['job_index']
+                            entry['start'] = start - gt_job['start']
+                            entry['end'] = end - gt_job['start']
+                            break
+                    add_attributes(entry, annotation, labels_mapping)
+                    final_data.append(entry)
+            else:
+                # Handle normal jobs
+                entry = create_entry(annotation, job_details, labels_mapping, i)
+                entry['job_id'] = job_details.id
+                entry['start'] = start
+                entry['end'] = end
+                add_attributes(entry, annotation, labels_mapping)
+                final_data.append(entry)
+
+        return final_data
+
+    def create_entry(annotation, job_details, labels_mapping, index):
+        return {
+            "project_id": job_details.segment.task.project_id,
+            "task_id": job_details.segment.task_id,
+            "path": os.path.basename(annotation_audio_chunk_file_paths[index]),
             "sentence": annotation.get("transcript", ""),
             "age": annotation.get("age", ""),
             "gender": annotation.get("gender", ""),
@@ -1070,10 +1164,9 @@ def get_audio_job_export_data(job_id, dst_file, job, temp_dir_base, temp_dir):
             "locale": annotation.get("locale", ""),
             "emotion": annotation.get("emotion", ""),
             "label": labels_mapping[annotation["label_id"]]["name"],
-            "start": annotation["points"][0],
-            "end": annotation["points"][3]
         }
 
+    def add_attributes(entry, annotation, labels_mapping):
         attributes = annotation.get("attributes", [])
         for idx, attr in enumerate(attributes):
             annotation_attribute_id = attr.get("spec_id", "")
@@ -1085,12 +1178,7 @@ def get_audio_job_export_data(job_id, dst_file, job, temp_dir_base, temp_dir):
             entry[f"attribute_{idx+1}_name"] = attribute_name
             entry[f"attribute_{idx+1}_value"] = attribute_val
 
-        final_data.append(entry)
-
-    slogger.glob.debug("JOB ANNOTATION DATA")
-    slogger.glob.debug(json.dumps(final_data))
-    slogger.glob.debug("All ANNOTATIONs DATA")
-    slogger.glob.debug(json.dumps(annotations))
+    final_data = process_annotations(annotations, gt_jobs, job_details, labels_mapping)
     return final_data, annotation_audio_chunk_file_paths
 
 def convert_annotation_data_format(data, format_name):
@@ -1247,7 +1335,8 @@ def export_audino_job(job_id, dst_file, format_name, server_url=None, save_image
         df = pd.DataFrame(final_data)
 
         # sorting by start column in ascending order
-        df = df.sort_values(by='start')
+        if 'job_id' in df.columns:
+            df = df.sort_values(by='job_id')
 
         # Saving the metadata file
         meta_data_file_path = os.path.join(temp_dir_base, str(job_id) + ".tsv")
