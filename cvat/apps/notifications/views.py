@@ -230,9 +230,12 @@ class NotificationsViewSet(viewsets.ViewSet):
                 if paginated_notifications is None:
                     return Response(
                         {
-                            "success": False,
+                            "success": True,
                             "message": "No notifications available on this page.",
-                            "data": None,
+                            "data": {
+                                "unread" : 0,
+                                "notifications": []
+                            },
                             "error": None
                         },
                         status = status.HTTP_400_BAD_REQUEST

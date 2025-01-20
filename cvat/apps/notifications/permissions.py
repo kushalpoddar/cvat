@@ -10,7 +10,6 @@ class NotificationPermission(OpenPolicyAgentPermission):
     @classmethod
     def create(cls, request, view, obj, iam_context):
         permissions = []
-
         for scope in cls.get_scopes(request, view, obj):
             perm = cls.create_base_perm(request, view, scope, iam_context, obj)
             permissions.append(perm)
@@ -34,4 +33,7 @@ class NotificationPermission(OpenPolicyAgentPermission):
         return []
 
     def get_resource(self):
-        return None
+        return {
+            'type': 'notifications',
+            'user_id': self.user_id,
+        }

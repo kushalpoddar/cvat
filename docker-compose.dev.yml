@@ -90,15 +90,15 @@ services:
     ports:
       - '9091:9091'
 
-  cvat_ui:
-    build:
-      context: .
-      args:
-        http_proxy:
-        https_proxy:
-        no_proxy:
-        socks_proxy:
-      dockerfile: Dockerfile.ui
+  # cvat_ui:
+  #   build:
+  #     context: .
+  #     args:
+  #       http_proxy:
+  #       https_proxy:
+  #       no_proxy:
+  #       socks_proxy:
+  #     dockerfile: Dockerfile.ui
 
   cvat_clickhouse:
     ports:

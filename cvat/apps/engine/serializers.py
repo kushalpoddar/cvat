@@ -728,7 +728,8 @@ class JobWriteSerializer(WriteOnceMixin, serializers.ModelSerializer):
                     # Randomly select from the list
                     import math, random
 
-                    random_jobs_no = math.ceil(frame_count / segment_size)
+                    job_percent = math.ceil((frame_count*100)/size)
+                    random_jobs_no = math.ceil((len(jobs_frame_list) * job_percent)/100)
                     selected_jobs_frames = random.sample(jobs_frame_list, random_jobs_no)
 
                     # Flatten and sort the selected frames
